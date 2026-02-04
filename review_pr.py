@@ -1,72 +1,119 @@
 import os
+import json
 import requests
 from anthropic import Anthropic
 
-# --- Required environment variables ---
+# -----------------------------
+# Environment variables
+# -----------------------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 
-# Extract PR number safely
-GITHUB_REF = os.environ["GITHUB_REF"]
-PR_NUMBER = GITHUB_REF.split("/")[-1]
+# -----------------------------
+# Read GitHub event payload
+# -----------------------------
+with open(os.environ["GITHUB_EVENT_PATH"], "r") as f:
+    event = json.load(f)
 
-# --- GitHub API headers ---
-headers = {
+pull_request = event["pull_request"]
+PR_NUMBER = pull_request["number"]
+
+print(f"Reviewing PR #{PR_NUMBER}")
+
+# -----------------------------
+# GitHub API headers
+# -----------------------------
+github_headers = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github.v3+json",
 }
 
-# --- Fetch PR metadata ---
+# -----------------------------
+# Fetch PR details
+# -----------------------------
 pr_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/pulls/{PR_NUMBER}"
-pr_response = requests.get(pr_url, headers=headers)
+pr_response = requests.get(pr_url, headers=github_headers)
 pr_response.raise_for_status()
 pr_data = pr_response.json()
 
-# --- Fetch PR diff ---
-diff_response = requests.get(pr_data["diff_url"], headers=headers)
-diff_response.raise_for_status()
-pr_diff = diff_response.text
+title = pr_data["title"]
+body = pr_data.get("body") or ""
+diff_url = pr_data["diff_url"]
 
-# --- Initialize Claude client ---
+# -----------------------------
+# Fetch PR diff
+# -----------------------------
+diff_response = requests.get(diff_url, headers=github_headers)
+diff_response.raise_for_status()
+diff_text = diff_response.text
+
+# -----------------------------
+# Initialize Claude client
+# -----------------------------
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# --- Claude prompt ---
+# -----------------------------
+# Build review prompt
+# -----------------------------
 prompt = f"""
 You are a senior software engineer performing a GitHub pull request review.
 
-Review the following diff and provide:
+Repository: {GITHUB_REPOSITORY}
+Pull Request Title: {title}
 
-1. A concise summary
-2. Major issues (bugs, correctness, regressions)
-3. Minor suggestions (style, clarity, maintainability)
-4. Questions for the author (if any)
+Pull Request Description:
+{body}
 
-Be precise, constructive, and actionable.
-Do not restate the diff verbatim.
+Below is the full diff of the pull request.
+
+Your task:
+- Provide a concise summary
+- Identify major issues (correctness, bugs, security)
+- Identify minor suggestions (style, clarity, maintainability)
+- Ask clarifying questions if intent is unclear
+
+Use clear section headers:
+Summary
+Major Issues
+Minor Suggestions
+Questions for the Author
 
 Diff:
-{pr_diff}
+{diff_text}
 """
 
-# --- Call Claude ---
+# -----------------------------
+# Call Claude
+# -----------------------------
 response = client.messages.create(
-    model="claude-3-5-sonnet-20240620",
+    model="claude-3-5-sonnet-20241022",
     max_tokens=1200,
     temperature=0.2,
-    messages=[{"role": "user", "content": prompt}],
+    messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+    ],
 )
 
 review_text = response.content[0].text
 
-# --- Post comment to PR ---
-comments_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues/{PR_NUMBER}/comments"
+# -----------------------------
+# Post review comment to PR
+# -----------------------------
+comment_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues/{PR_NUMBER}/comments"
 
-payload = {
-    "body": f"## 🤖 Claude AI Code Review\n\n{review_text}"
+comment_payload = {
+    "body": f"## 🤖 AI PR Review (Claude)\n\n{review_text}"
 }
 
-post_response = requests.post(comments_url, headers=headers, json=payload)
-post_response.raise_for_status()
+comment_response = requests.post(
+    comment_url,
+    headers=github_headers,
+    json=comment_payload,
+)
+comment_response.raise_for_status()
 
-print("Claude review posted successfully.")
+print("Claude PR review posted successfully.")
